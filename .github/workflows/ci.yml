@@ -19,9 +19,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Build the vector index
-        run: python scripts/build_index.py
-
       - name: Run evaluation suite
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

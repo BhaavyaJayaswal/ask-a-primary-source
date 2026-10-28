@@ -7,10 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ app/
 COPY mcp_server/ mcp_server/
-COPY scripts/ scripts/
-COPY corpus/processed/ corpus/processed/
-
-RUN python scripts/build_index.py
+COPY chroma_db/ chroma_db/
 
 EXPOSE 8000
 
