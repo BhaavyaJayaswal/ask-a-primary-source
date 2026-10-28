@@ -1,21 +1,33 @@
-"""Embed every chunk in corpus/processed/chunks.jsonl and store it in a local
-Chroma collection, then run one test query to sanity-check retrieval.
+"""Embed every chunk in corpus/processed/chunks.jsonl using Gemini's hosted
+embedding API and store it in a local Chroma collection, then run one test
+query to sanity-check retrieval.
 
 Run with:  python scripts/build_index.py
 """
 
 import json
+import os
+import time
 from pathlib import Path
 
 import chromadb
-from sentence_transformers import SentenceTransformer
+from dotenv import load_dotenv
+from google import genai
+from google.genai import errors as genai_errors
+
+load_dotenv()
 
 CHUNKS_PATH = Path(__file__).parent.parent / "corpus" / "processed" / "chunks.jsonl"
 CHROMA_DIR = Path(__file__).parent.parent / "chroma_db"
 COLLECTION_NAME = "primary_sources"
-EMBEDDING_MODEL_NAME = "all-mpnet-base-v2"
+EMBEDDING_MODEL_NAME = "gemini-embedding-001"
+EMBED_BATCH_SIZE = 10
+RATE_LIMIT_WAIT_SECONDS = 30
+MAX_RETRIES = 6
 
 TEST_QUESTION = "Who converted the Anglo-Saxons to Christianity?"
+
+gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
 
 def load_chunks() -> list[dict]:
@@ -37,18 +49,46 @@ def to_chroma_metadata(chunk: dict) -> dict:
     }
 
 
+def embed_batch_with_retry(batch: list[str]):
+    """The free tier allows only 30,000 embedding tokens per minute, which
+    our corpus blows past quickly. On a 429 (rate limit) error, wait and
+    retry the same batch instead of giving up."""
+    for attempt in range(MAX_RETRIES):
+        try:
+            return gemini_client.models.embed_content(
+                model=EMBEDDING_MODEL_NAME,
+                contents=batch,
+            )
+        except genai_errors.ClientError as e:
+            if e.code == 429 and attempt < MAX_RETRIES - 1:
+                print(f"  Rate limited, waiting {RATE_LIMIT_WAIT_SECONDS}s "
+                      f"before retrying (attempt {attempt + 1})...")
+                time.sleep(RATE_LIMIT_WAIT_SECONDS)
+            else:
+                raise
+
+
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    """Embed a list of texts via Gemini's API, in small batches to stay
+    well under any per-request size limit."""
+    all_embeddings = []
+    for i in range(0, len(texts), EMBED_BATCH_SIZE):
+        batch = texts[i:i + EMBED_BATCH_SIZE]
+        response = embed_batch_with_retry(batch)
+        all_embeddings.extend(e.values for e in response.embeddings)
+        print(f"  Embedded {min(i + EMBED_BATCH_SIZE, len(texts))}/{len(texts)}")
+    return all_embeddings
+
+
 def main():
     print(f"Loading chunks from {CHUNKS_PATH}...")
     chunks = load_chunks()
     print(f"Loaded {len(chunks)} chunks.")
 
-    print(f"Loading embedding model '{EMBEDDING_MODEL_NAME}' "
-          f"(first run downloads it, ~80MB)...")
-    model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-
     texts = [c["text"] for c in chunks]
-    print("Embedding all chunks (this may take a minute on CPU)...")
-    embeddings = model.encode(texts, show_progress_bar=True, batch_size=32)
+    print(f"Embedding all chunks via Gemini's '{EMBEDDING_MODEL_NAME}' API "
+          f"(in batches of {EMBED_BATCH_SIZE})...")
+    embeddings = embed_texts(texts)
 
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
     # Delete any old collection of the same name so re-running this script
@@ -61,7 +101,7 @@ def main():
     print("Writing into Chroma...")
     collection.add(
         ids=[c["id"] for c in chunks],
-        embeddings=embeddings.tolist(),
+        embeddings=embeddings,
         documents=texts,
         metadatas=[to_chroma_metadata(c) for c in chunks],
     )
@@ -69,8 +109,8 @@ def main():
           f"at {CHROMA_DIR}")
 
     print(f"\n--- Test query: {TEST_QUESTION!r} ---")
-    query_embedding = model.encode([TEST_QUESTION])
-    results = collection.query(query_embeddings=query_embedding.tolist(), n_results=3)
+    query_embedding = embed_texts([TEST_QUESTION])
+    results = collection.query(query_embeddings=query_embedding, n_results=3)
 
     for rank, (doc, meta, distance) in enumerate(zip(
         results["documents"][0], results["metadatas"][0], results["distances"][0]

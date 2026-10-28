@@ -12,13 +12,12 @@ from google.genai import types
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer
 
 load_dotenv()
 
 CHROMA_DIR = Path(__file__).parent.parent / "chroma_db"
 COLLECTION_NAME = "primary_sources"
-EMBEDDING_MODEL_NAME = "all-mpnet-base-v2"
+EMBEDDING_MODEL_NAME = "gemini-embedding-001"
 GEMINI_MODEL_NAME = "gemini-flash-lite-latest"
 TOP_K = 5
 MCP_SERVER_PATH = Path(__file__).parent.parent / "mcp_server" / "server.py"
@@ -51,9 +50,10 @@ async def _call_mcp_tool(name: str, args: dict) -> str:
             return result.content[0].text
 
 
-# Loaded once when the server starts, not on every request — these are the
-# slow parts (loading a model, opening the database connection).
-embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+# Loaded once when the server starts, not on every request — opening the
+# database connection is the slow part here (embeddings now come from
+# Gemini's hosted API instead of a locally-loaded model, so there's no
+# heavy model-loading step anymore).
 chroma_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
 collection = chroma_client.get_collection(COLLECTION_NAME)
 gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
@@ -117,7 +117,11 @@ Answer:"""
 
 @app.post("/ask", response_model=AskResponse)
 def ask(request: AskRequest) -> AskResponse:
-    query_embedding = embedding_model.encode([request.question]).tolist()
+    embed_response = gemini_client.models.embed_content(
+        model=EMBEDDING_MODEL_NAME,
+        contents=[request.question],
+    )
+    query_embedding = [embed_response.embeddings[0].values]
     results = collection.query(query_embeddings=query_embedding, n_results=TOP_K)
 
     sources = [

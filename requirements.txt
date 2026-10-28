@@ -3,6 +3,5 @@ uvicorn==0.54.0
 google-genai==2.29.0
 python-dotenv==1.2.4
 chromadb==1.5.9
-sentence-transformers==6.1.0
 mcp==2.3.0
 pytest==9.1.1
